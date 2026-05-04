@@ -1,14 +1,33 @@
-use std::env;
+mod db;
 
+use std::{env, sync::LazyLock};
+
+use regex::Regex;
 use serenity::{
     async_trait,
-    model::{gateway::Ready, voice::VoiceState},
+    model::{channel::Message, gateway::Ready, voice::VoiceState},
     prelude::*,
 };
 use tracing::{error, info};
 
+static IGN_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bign\b").expect("Invalid IGN regex"));
+
+const IGN_YOUTUBE_PATTERNS: &[&str] = &[
+    "youtube.com/@ign",
+    "youtube.com/user/ign",
+    "youtube.com/c/ign",
+    "youtube.com/ign",
+];
+
+fn is_ign_message(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    IGN_REGEX.is_match(content) || IGN_YOUTUBE_PATTERNS.iter().any(|p| lower.contains(p))
+}
+
 struct Handler {
     loser_channel_id: u64,
+    db: libsql::Database,
 }
 
 #[async_trait]
@@ -17,13 +36,25 @@ impl EventHandler for Handler {
         info!("{} is connected and ready", ready.user.name);
     }
 
+    async fn message(&self, _ctx: Context, msg: Message) {
+        if msg.author.bot {
+            return;
+        }
+        if is_ign_message(&msg.content) {
+            if let Err(e) = db::increment_count(&self.db, &msg.author.id.to_string()).await {
+                error!(
+                    "Failed to increment IGN count for {}: {:?}",
+                    msg.author.id, e
+                );
+            }
+        }
+    }
+
     async fn voice_state_update(&self, ctx: Context, old: Option<VoiceState>, new: VoiceState) {
-        // Only care about join events (user entering a channel, not leaving)
         let Some(channel_id) = new.channel_id else {
             return;
         };
 
-        // Ignore pure moves between channels — only fire on fresh joins
         if let Some(ref prev) = old {
             if prev.channel_id.is_some() {
                 return;
@@ -35,7 +66,6 @@ impl EventHandler for Handler {
             None => return,
         };
 
-        // Count members currently in this voice channel via the cache
         let member_count = {
             let guild = match ctx.cache.guild(guild_id) {
                 Some(g) => g,
@@ -77,10 +107,26 @@ async fn main() {
         .parse()
         .expect("LOSER_CHANNEL_ID must be a valid u64");
 
-    let intents = GatewayIntents::GUILDS | GatewayIntents::GUILD_VOICE_STATES;
+    let turso_url = env::var("TURSO_URL").expect("TURSO_URL must be set");
+    let turso_token = env::var("TURSO_AUTH_TOKEN").expect("TURSO_AUTH_TOKEN must be set");
+
+    let db = db::connect(&turso_url, &turso_token)
+        .await
+        .expect("Failed to connect to Turso");
+    db::run_migrations(&db)
+        .await
+        .expect("Failed to run migrations");
+
+    let intents = GatewayIntents::GUILDS
+        | GatewayIntents::GUILD_VOICE_STATES
+        | GatewayIntents::GUILD_MESSAGES
+        | GatewayIntents::MESSAGE_CONTENT;
 
     let mut client = Client::builder(&token, intents)
-        .event_handler(Handler { loser_channel_id })
+        .event_handler(Handler {
+            loser_channel_id,
+            db,
+        })
         .await
         .expect("Error creating client");
 

@@ -8,12 +8,6 @@ primary_region = 'iad'
 
 [build]
 
-# No http_service — this is a Discord gateway bot, not a web server.
-# One machine only; do not auto-scale.
-[machines]
-  min_count = 1
-  max_count = 1
-
 [[vm]]
   memory = '256mb'
   cpus = 1
