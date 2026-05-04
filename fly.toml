@@ -1,0 +1,19 @@
+# fly.toml app configuration file generated for loser-bot on 2026-05-04T18:21:09-04:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'loser-bot'
+primary_region = 'iad'
+
+[build]
+
+# No http_service — this is a Discord gateway bot, not a web server.
+# One machine only; do not auto-scale.
+[machines]
+  min_count = 1
+  max_count = 1
+
+[[vm]]
+  memory = '256mb'
+  cpus = 1
