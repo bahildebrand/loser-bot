@@ -1,6 +1,7 @@
 mod db;
+mod loser_count;
 
-use std::{env, sync::LazyLock};
+use std::{env, sync::{Arc, LazyLock}, time::Duration};
 
 use regex::Regex;
 use serenity::{
@@ -8,7 +9,10 @@ use serenity::{
     model::{channel::Message, gateway::Ready, voice::VoiceState},
     prelude::*,
 };
+use tokio::time::sleep;
 use tracing::{error, info};
+
+use crate::loser_count::check_and_call_out_loser;
 
 static IGN_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bign\b").expect("Invalid IGN regex"));
@@ -20,6 +24,8 @@ const IGN_YOUTUBE_PATTERNS: &[&str] = &[
     "youtube.com/ign",
 ];
 
+const USER_LOGOUT_DELAY: Duration = Duration::from_mins(2);
+
 fn is_ign_message(content: &str) -> bool {
     let lower = content.to_lowercase();
     IGN_REGEX.is_match(content) || IGN_YOUTUBE_PATTERNS.iter().any(|p| lower.contains(p))
@@ -27,7 +33,7 @@ fn is_ign_message(content: &str) -> bool {
 
 struct Handler {
     loser_channel_id: u64,
-    db: libsql::Database,
+    db: Arc<libsql::Database>,
 }
 
 #[async_trait]
@@ -41,7 +47,14 @@ impl EventHandler for Handler {
             return;
         }
         if is_ign_message(&msg.content) {
-            if let Err(e) = db::increment_count(&self.db, &msg.author.id.to_string()).await {
+            let conn = match self.db.connect() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    error!("Failed to connect to db: {:?}", e);
+                    return;
+                }
+            };
+            if let Err(e) = db::increment_count(conn, &msg.author.id.to_string()).await {
                 error!(
                     "Failed to increment IGN count for {}: {:?}",
                     msg.author.id, e
@@ -51,45 +64,56 @@ impl EventHandler for Handler {
     }
 
     async fn voice_state_update(&self, ctx: Context, old: Option<VoiceState>, new: VoiceState) {
-        let Some(channel_id) = new.channel_id else {
-            return;
-        };
-
-        if let Some(ref prev) = old {
-            if prev.channel_id.is_some() {
-                return;
-            }
-        }
-
         let guild_id = match new.guild_id {
             Some(id) => id,
             None => return,
         };
 
-        let member_count = {
-            let guild = match ctx.cache.guild(guild_id) {
-                Some(g) => g,
-                None => return,
-            };
-            guild
-                .voice_states
-                .values()
-                .filter(|vs| vs.channel_id == Some(channel_id))
-                .count()
+        let old_channel = old.as_ref().and_then(|o| o.channel_id);
+        let new_channel = new.channel_id;
+
+        // Only handle fresh joins (None -> Some) and leaves (Some -> None).
+        // Ignore moves (Some -> Some).
+        let (check_channel, joiner) = match (old_channel, new_channel) {
+            (None, Some(ch)) => (ch, Some(new.user_id)),
+            (Some(ch), None) => (ch, None),
+            _ => return,
         };
 
-        if member_count == 1 {
-            let loser_channel = serenity::model::id::ChannelId::new(self.loser_channel_id);
-            let msg = format!(
-                "<@{}> lmaooo you're the only one here you fucking loser 💀",
-                new.user_id
-            );
-            if let Err(e) = loser_channel.say(&ctx.http, &msg).await {
-                error!("Failed to send loser message: {:?}", e);
-            }
-            if let Err(e) = db::increment_loser_count(&self.db, &new.user_id.to_string()).await {
-                error!("Failed to increment loser count for {}: {:?}", new.user_id, e);
-            }
+        let user_left = joiner.is_none();
+
+        if user_left {
+            let channel_id = self.loser_channel_id;
+            let db = self.db.clone();
+            tokio::spawn(async move {
+                sleep(USER_LOGOUT_DELAY).await;
+                let conn = match db.connect() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        error!("Failed to connect to db: {:?}", e);
+                        return;
+                    }
+                };
+                check_and_call_out_loser(ctx, guild_id, conn, channel_id, joiner, check_channel)
+                    .await;
+            });
+        } else {
+            let conn = match self.db.connect() {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("Failed to connect to db: {:?}", e);
+                    return;
+                }
+            };
+            check_and_call_out_loser(
+                ctx,
+                guild_id,
+                conn,
+                self.loser_channel_id,
+                joiner,
+                check_channel,
+            )
+            .await;
         }
     }
 }
@@ -113,9 +137,11 @@ async fn main() {
     let turso_url = env::var("TURSO_URL").expect("TURSO_URL must be set");
     let turso_token = env::var("TURSO_AUTH_TOKEN").expect("TURSO_AUTH_TOKEN must be set");
 
-    let db = db::connect(&turso_url, &turso_token)
-        .await
-        .expect("Failed to connect to Turso");
+    let db = Arc::new(
+        db::connect(&turso_url, &turso_token)
+            .await
+            .expect("Failed to connect to Turso"),
+    );
     db::run_migrations(&db)
         .await
         .expect("Failed to run migrations");

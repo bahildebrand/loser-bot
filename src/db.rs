@@ -1,10 +1,13 @@
 use anyhow::Result;
-use libsql::params;
+use libsql::{Connection, params};
 use tracing::info;
 
 const MIGRATIONS: &[(&str, &str)] = &[
     ("001_initial", include_str!("../migrations/001_initial.sql")),
-    ("002_loser_counts", include_str!("../migrations/002_loser_counts.sql")),
+    (
+        "002_loser_counts",
+        include_str!("../migrations/002_loser_counts.sql"),
+    ),
 ];
 
 pub async fn connect(url: &str, auth_token: &str) -> Result<libsql::Database> {
@@ -46,8 +49,7 @@ pub async fn run_migrations(db: &libsql::Database) -> Result<()> {
     Ok(())
 }
 
-pub async fn increment_count(db: &libsql::Database, user_id: &str) -> Result<()> {
-    let conn = db.connect()?;
+pub async fn increment_count(conn: Connection, user_id: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO ign_counts (user_id, count, updated_at)
          VALUES (?1, 1, datetime('now'))
@@ -60,8 +62,7 @@ pub async fn increment_count(db: &libsql::Database, user_id: &str) -> Result<()>
     Ok(())
 }
 
-pub async fn increment_loser_count(db: &libsql::Database, user_id: &str) -> Result<()> {
-    let conn = db.connect()?;
+pub async fn increment_loser_count(conn: Connection, user_id: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO loser_counts (user_id, count, updated_at)
          VALUES (?1, 1, datetime('now'))
