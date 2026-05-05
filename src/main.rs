@@ -1,15 +1,15 @@
 mod db;
 mod loser_count;
 
-use std::{env, sync::{Arc, LazyLock}, time::Duration};
+use std::{collections::HashMap, env, sync::{Arc, LazyLock}, time::{Duration, Instant}};
 
 use regex::Regex;
 use serenity::{
     async_trait,
-    model::{channel::Message, gateway::Ready, voice::VoiceState},
+    model::{channel::Message, gateway::Ready, id::UserId, voice::VoiceState},
     prelude::*,
 };
-use tokio::time::sleep;
+use tokio::{sync::Mutex, time::sleep};
 use tracing::{error, info};
 
 use crate::loser_count::check_and_call_out_loser;
@@ -25,6 +25,7 @@ const IGN_YOUTUBE_PATTERNS: &[&str] = &[
 ];
 
 const USER_LOGOUT_DELAY: Duration = Duration::from_mins(2);
+const LOSER_COOLDOWN: Duration = Duration::from_secs(300);
 
 fn is_ign_message(content: &str) -> bool {
     let lower = content.to_lowercase();
@@ -34,6 +35,7 @@ fn is_ign_message(content: &str) -> bool {
 struct Handler {
     loser_channel_id: u64,
     db: Arc<libsql::Database>,
+    cooldowns: Arc<Mutex<HashMap<UserId, Instant>>>,
 }
 
 #[async_trait]
@@ -85,6 +87,7 @@ impl EventHandler for Handler {
         if user_left {
             let channel_id = self.loser_channel_id;
             let db = self.db.clone();
+            let cooldowns = self.cooldowns.clone();
             tokio::spawn(async move {
                 sleep(USER_LOGOUT_DELAY).await;
                 let conn = match db.connect() {
@@ -94,7 +97,7 @@ impl EventHandler for Handler {
                         return;
                     }
                 };
-                check_and_call_out_loser(ctx, guild_id, conn, channel_id, joiner, check_channel)
+                check_and_call_out_loser(ctx, guild_id, conn, channel_id, joiner, check_channel, cooldowns)
                     .await;
             });
         } else {
@@ -112,6 +115,7 @@ impl EventHandler for Handler {
                 self.loser_channel_id,
                 joiner,
                 check_channel,
+                self.cooldowns.clone(),
             )
             .await;
         }
@@ -155,6 +159,7 @@ async fn main() {
         .event_handler(Handler {
             loser_channel_id,
             db,
+            cooldowns: Arc::new(Mutex::new(HashMap::new())),
         })
         .await
         .expect("Error creating client");

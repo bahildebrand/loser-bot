@@ -1,8 +1,15 @@
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::Instant,
+};
+
 use libsql::Connection;
 use serenity::all::{ChannelId, Context, GuildId, UserId};
+use tokio::sync::Mutex;
 use tracing::error;
 
-use crate::db::increment_loser_count;
+use crate::{LOSER_COOLDOWN, db::increment_loser_count};
 
 pub async fn check_and_call_out_loser(
     ctx: Context,
@@ -11,6 +18,7 @@ pub async fn check_and_call_out_loser(
     channel_id: u64,
     joining_user: Option<UserId>,
     check_channel: ChannelId,
+    cooldowns: Arc<Mutex<HashMap<UserId, Instant>>>,
 ) {
     let remaining: Vec<serenity::model::id::UserId> = {
         let guild = match ctx.cache.guild(guild_id) {
@@ -30,6 +38,14 @@ pub async fn check_and_call_out_loser(
         None if remaining.len() == 1 => remaining[0],
         _ => return,
     };
+
+    {
+        let mut map = cooldowns.lock().await;
+        if map.get(&target_user).map_or(false, |t| t.elapsed() < LOSER_COOLDOWN) {
+            return;
+        }
+        map.insert(target_user, Instant::now());
+    }
 
     let loser_channel = serenity::model::id::ChannelId::new(channel_id);
     let msg = format!(
