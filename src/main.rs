@@ -87,6 +87,9 @@ impl EventHandler for Handler {
             if let Err(e) = loser_channel.say(&ctx.http, &msg).await {
                 error!("Failed to send loser message: {:?}", e);
             }
+            if let Err(e) = db::increment_loser_count(&self.db, &new.user_id.to_string()).await {
+                error!("Failed to increment loser count for {}: {:?}", new.user_id, e);
+            }
         }
     }
 }
